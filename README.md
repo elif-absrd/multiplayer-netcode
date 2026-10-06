@@ -181,17 +181,50 @@ The current repository starts with the client and server components:
 
 ```text
 multiplayer-netcode/
-├── client/
-└── server/
-```
-
-The authoritative server implementation begins with:
-
-```text
-server/
-├── protocol.ts
-├── game.ts
-└── index.ts
+├─ package.json              # root scripts only
+├─ pnpm-workspace.yaml
+├─ tsconfig.base.json
+├─ .gitignore
+├─ README.md
+├─ docs/
+│  └─ phases.md              # what each phase adds + how to verify it
+│
+├─ shared/                   # @netcode/shared (used by BOTH sides)
+│  ├─ package.json
+│  ├─ tsconfig.json
+│  └─ src/
+│     ├─ index.ts            # re-exports everything
+│     ├─ constants.ts        # TICK_RATE, MAX_SPEED, etc.
+│     ├─ protocol.ts         # message types, encode/decode
+│     └─ sim.ts              # deterministic step(state, input, dt)
+│
+├─ server/
+│  ├─ package.json
+│  ├─ tsconfig.json
+│  ├─ src/
+│  │  ├─ index.ts            # WebSocket bootstrap only
+│  │  ├─ game.ts             # authoritative loop, players, snapshots
+│  │  └─ (later) lagcomp.ts, rooms.ts
+│  └─ test/
+│     └─ game.test.ts        # your current test-game.ts
+│
+├─ client/
+│  ├─ package.json
+│  ├─ tsconfig.json
+│  ├─ index.html
+│  └─ src/
+│     ├─ main.ts             # wiring only
+│     ├─ net.ts              # WebSocket, send/receive
+│     ├─ input.ts            # keyboard → input commands
+│     ├─ render.ts           # canvas drawing
+│     ├─ prediction.ts       # (phase) prediction + reconciliation
+│     ├─ interpolation.ts    # (phase) remote entity smoothing
+│     └─ style.css
+│
+└─ scripts/                  # cross-package dev tooling
+   ├─ smoke-test.ts          # boots server, connects N fake clients
+   ├─ bot.ts                 # (later) fake players for load
+   └─ lag-proxy.ts           # (later) simulate latency/jitter/loss
 ```
 
 Additional project components will be introduced as later phases are implemented, including the proxy, SQLite instrumentation, deterministic bots, and the analysis pipeline.

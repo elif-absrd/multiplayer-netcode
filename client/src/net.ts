@@ -11,7 +11,9 @@ export class Net {
 
   constructor(handlers: Handlers) {
     const half = config.fakeLagMs / 2; // dev-only artificial delay, each direction
-    this.ws = new WebSocket(`ws://${location.hostname}:${SERVER_PORT}`);
+    const envPort = Number(import.meta.env.VITE_SERVER_PORT);
+    const port = Number.isFinite(envPort) && envPort > 0 ? envPort : SERVER_PORT;
+    this.ws = new WebSocket(`ws://${location.hostname}:${port}`);
     this.ws.onopen = () => handlers.onOpen();
     this.ws.onclose = () => console.warn("disconnected");
     this.ws.onmessage = (e) => {

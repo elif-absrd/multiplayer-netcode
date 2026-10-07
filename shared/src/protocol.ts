@@ -11,7 +11,9 @@ export interface ClientInput {
   clientTime: number; // ms, client clock, stamped when the input was created
   dx: number;         // -1..1
   dy: number;         // -1..1
-  inputBits: number;  // bit0 = tag (INPUT_TAG)
+  aimX: number;       // normalized aim direction
+  aimY: number;
+  inputBits: number;  // bit0 = fire, bit1 = sprint
   // Phase 5: how far behind the client's estimated server time the world it was
   // looking at was (ms). = rtt/2 (+ interpolation delay if interpolating).
   // Server rewinds to: clientTime + offset - viewDelay.
@@ -46,6 +48,13 @@ export interface PlayerSnap {
   y: number;
   vx: number;
   vy: number;
+  aimX: number;
+  aimY: number;
+  health: number;
+  stamina: number;
+  alive: boolean;
+  respawnTicks: number;
+  score: number;
   lastProcessedInputSeq: number;
 }
 
@@ -53,16 +62,23 @@ export type GameEvent =
   | { kind: "join"; id: number }
   | { kind: "leave"; id: number }
   | {
-      kind: "tag";            // every tag ATTEMPT, hit or miss (Phase 8 logs these)
+      kind: "shot";           // every shot ATTEMPT, hit or miss (Phase 8 logs these)
       attacker: number;
       target: number | null;  // who was hit (null = miss)
       hit: boolean;           // the server's verdict
       hitNow: boolean;        // would it have hit against CURRENT positions?
+      damage: number;
+      killed: boolean;
+      blockedByWall: boolean;
+      fromX: number;
+      fromY: number;
+      toX: number;
+      toY: number;
       tick: number;
       rewindMs: number;       // how far back the server looked (0 if uncompensated)
       compensated: boolean;   // was history actually used?
-    };
-// Phase 6 will add: { kind: "round_reset" }, scores
+    }
+  | { kind: "respawn"; id: number; x: number; y: number; tick: number };
 
 export interface ServerSnapshot {
   t: "snapshot";

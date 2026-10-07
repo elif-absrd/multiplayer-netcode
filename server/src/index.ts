@@ -1,6 +1,6 @@
 import { WebSocketServer, WebSocket } from "ws";
 import {
-  SERVER_PORT, TICK_MS, TICK_RATE,
+  SERVER_PORT as DEFAULT_SERVER_PORT, TICK_MS, TICK_RATE,
   decode, encode,
   type ClientMessage,
 } from "@netcode/shared";
@@ -9,8 +9,9 @@ import { serverNow } from "./time";
 
 // Experiment variable: LAG_COMP=0 disables compensation (Phase 9 will drive this).
 const lagComp = process.env.LAG_COMP !== "0";
+const port = Number(process.env.PORT ?? DEFAULT_SERVER_PORT);
 const game = new Game({ lagComp });
-const wss = new WebSocketServer({ port: SERVER_PORT });
+const wss = new WebSocketServer({ port });
 const sockets = new Map<WebSocket, number>();
 
 wss.on("connection", (ws) => {
@@ -56,4 +57,4 @@ function loop() {
 }
 loop();
 
-console.log(`server on ws://localhost:${SERVER_PORT} @ ${TICK_RATE} Hz, lag compensation ${lagComp ? "ON" : "OFF"}`);
+console.log(`server on ws://localhost:${port} @ ${TICK_RATE} Hz, lag compensation ${lagComp ? "ON" : "OFF"}`);

@@ -21,6 +21,7 @@ body {
   display: flex;
   align-items: center;
   justify-content: center;
+  cursor: crosshair;
 }
 
 /* --------------------------------------------------
@@ -57,7 +58,8 @@ body {
   position: fixed;
   inset: 0;
 
-  background: #0b0b0d;
+  background:
+    linear-gradient(135deg, #080b10 0%, #101720 48%, #090d13 100%);
 
   z-index: 1;
 }
@@ -65,15 +67,87 @@ body {
 #game-area {
   position: absolute;
   inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 22px;
 }
-
-/*
-   The actual canvas created by render.ts
-   stays untouched.
-*/
 
 canvas {
   display: block;
+  width: min(100%, calc((100vh - 44px) * 1.5));
+  max-width: 960px;
+  height: auto;
+  max-height: calc(100vh - 44px);
+  border: 1px solid #3d4a5d;
+  box-shadow:
+    0 28px 90px rgba(0, 0, 0, 0.55),
+    0 0 0 1px rgba(255, 255, 255, 0.05);
+}
+
+.webgl-hud {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  padding: 34px;
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 18px;
+  color: #eef4fb;
+  font-family:
+    "JetBrains Mono",
+    "Cascadia Code",
+    Consolas,
+    monospace;
+}
+
+.hud-panel {
+  min-width: 230px;
+  padding: 14px 16px;
+  background: rgba(4, 8, 14, 0.76);
+  border: 1px solid rgba(179, 203, 234, 0.18);
+  border-radius: 8px;
+  box-shadow: 0 18px 55px rgba(0, 0, 0, 0.28);
+  backdrop-filter: blur(8px);
+}
+
+.hud-title {
+  margin-bottom: 10px;
+  color: #ffffff;
+  font-size: 15px;
+  font-weight: 700;
+  letter-spacing: 1px;
+}
+
+.hud-grid,
+.hud-net {
+  display: grid;
+  grid-template-columns: auto auto;
+  gap: 7px 18px;
+  font-size: 12px;
+}
+
+.hud-net div {
+  display: contents;
+}
+
+.hud-panel span {
+  color: #9ba9bb;
+}
+
+.hud-panel strong {
+  color: #eef4fb;
+  font-weight: 600;
+  text-align: right;
+}
+
+.hud-panel strong.on {
+  color: #57f29b;
+}
+
+.hud-panel strong.off {
+  color: #ff6767;
 }
 
 /* --------------------------------------------------
@@ -91,6 +165,7 @@ canvas {
   background: rgba(16, 16, 19, 0.97);
 
   border: 1px solid #3a3a40;
+  border-radius: 8px;
 
   box-shadow:
     0 0 0 1px rgba(255, 255, 255, 0.02),
@@ -290,6 +365,7 @@ kbd {
   letter-spacing: 2px;
 
   cursor: pointer;
+  border-radius: 6px;
 
   transition:
     background 120ms ease,
@@ -335,6 +411,7 @@ kbd {
   font-size: 12px;
 
   cursor: pointer;
+  border-radius: 6px;
 
   z-index: 20;
 }

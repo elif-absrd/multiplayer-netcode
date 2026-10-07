@@ -24,12 +24,13 @@ let lagComp: boolean | null = null;
 let latest: ServerSnapshot | null = null;
 
 let seq = 0;
-let lastTag = "-";
+let lastShot = "-";
 
 let gameStarted = false;
 let paused = false;
 
 const flashUntil = new Map<number, number>();
+const shotEffects: { fromX: number; fromY: number; toX: number; toY: number; hit: boolean; blocked: boolean; until: number }[] = [];
 const recentCorrections: number[] = [];
 
 predictor.onCorrection = (mag) => {
@@ -52,10 +53,10 @@ app.innerHTML = `
 
       <div class="eyebrow">REAL-TIME NETWORKING EXPERIMENT</div>
 
-      <h1>TAG PROTOCOL</h1>
+      <h1>NET STRIKE</h1>
 
       <p class="subtitle">
-        Two-player multiplayer under unreliable network conditions
+        Two-player arena shooter powered by authoritative netcode
       </p>
 
       <div class="info-grid">
@@ -78,8 +79,13 @@ app.innerHTML = `
           </div>
 
           <div class="control-row">
-            <span><kbd>SPACE</kbd></span>
-            <span>Tag opponent</span>
+            <span><kbd>MOUSE</kbd><kbd>SPACE</kbd></span>
+            <span>Fire</span>
+          </div>
+
+          <div class="control-row">
+            <span><kbd>SHIFT</kbd></span>
+            <span>Sprint</span>
           </div>
 
           <div class="control-row">
@@ -113,7 +119,7 @@ app.innerHTML = `
 
           <div class="feature-row">
             <span class="dot amber"></span>
-            <span>Server lag compensation</span>
+            <span>Lag-compensated shots</span>
           </div>
 
           <div class="player-legend">
@@ -188,8 +194,13 @@ app.innerHTML = `
           </div>
 
           <div class="control-row">
-            <span><kbd>SPACE</kbd></span>
-            <span>Tag</span>
+            <span><kbd>MOUSE</kbd><kbd>SPACE</kbd></span>
+            <span>Fire</span>
+          </div>
+
+          <div class="control-row">
+            <span><kbd>SHIFT</kbd></span>
+            <span>Sprint</span>
           </div>
 
           <div class="control-row">
@@ -247,8 +258,8 @@ app.innerHTML = `
           </div>
 
           <div class="stat-row">
-            <span>Last Tag</span>
-            <strong id="stat-tag">-</strong>
+            <span>Last Shot</span>
+            <strong id="stat-shot">-</strong>
           </div>
         </section>
 
@@ -311,7 +322,7 @@ const statRtt = document.getElementById("stat-rtt")!;
 const statJitter = document.getElementById("stat-jitter")!;
 const statOffset = document.getElementById("stat-offset")!;
 const statCorrection = document.getElementById("stat-correction")!;
-const statTag = document.getElementById("stat-tag")!;
+const statShot = document.getElementById("stat-shot")!;
 
 const statusPrediction = document.getElementById("status-prediction")!;
 const statusInterpolation = document.getElementById("status-interpolation")!;
@@ -342,7 +353,7 @@ function updatePauseStats() {
   statCorrection.textContent =
     `${predictor.lastCorrection.toFixed(2)} px`;
 
-  statTag.textContent = lastTag;
+  statShot.textContent = lastShot;
 
   statusPrediction.textContent =
     config.prediction ? "ON" : "OFF";
@@ -454,7 +465,12 @@ function onSnapshot(snap: ServerSnapshot) {
   }
 
   for (const ev of snap.events) {
-    if (ev.kind !== "tag") continue;
+    if (ev.kind === "respawn") {
+      flashUntil.set(ev.id, performance.now() + 220);
+      continue;
+    }
+
+    if (ev.kind !== "shot") continue;
 
     const verdict = ev.hit ? "HIT" : "MISS";
 
@@ -467,8 +483,20 @@ function onSnapshot(snap: ServerSnapshot) {
       ? `rewound ${ev.rewindMs.toFixed(0)}ms`
       : "uncompensated";
 
-    lastTag =
-      `${verdict} ${ev.attacker}->${ev.target ?? "-"} ${mode}${now}`;
+    const wall = ev.blockedByWall ? " wall" : "";
+
+    lastShot =
+      `${verdict} ${ev.attacker}->${ev.target ?? "-"} ${mode}${now}${wall}`;
+
+    shotEffects.push({
+      fromX: ev.fromX,
+      fromY: ev.fromY,
+      toX: ev.toX,
+      toY: ev.toY,
+      hit: ev.hit,
+      blocked: ev.blockedByWall,
+      until: performance.now() + 140,
+    });
 
     if (ev.hit && ev.target !== null) {
       flashUntil.set(
@@ -488,7 +516,8 @@ function sendInput() {
   // or while paused.
   if (!gameStarted || paused) return;
 
-  const { dx, dy, inputBits } = readInput();
+  const own = myId !== null ? predictor.state ?? latest?.players.find((p) => p.id === myId) ?? null : null;
+  const { dx, dy, aimX, aimY, inputBits } = readInput(own);
 
   const input: ClientInput = {
     t: "input",
@@ -497,6 +526,8 @@ function sendInput() {
       performance.timeOrigin + performance.now(),
     dx,
     dy,
+    aimX,
+    aimY,
     inputBits,
     viewDelay: viewDelayMs(),
   };
@@ -568,17 +599,9 @@ function frame() {
         config.prediction &&
         predictor.state
       ) {
-        drawn.push({
-          id: p.id,
-          x: predictor.state.x,
-          y: predictor.state.y,
-        });
+        drawn.push({ ...p, ...predictor.state });
 
-        ghost = {
-          id: p.id,
-          x: p.x,
-          y: p.y,
-        };
+        ghost = { ...p };
 
         continue;
       }
@@ -586,7 +609,7 @@ function frame() {
       const pos = sampled?.get(p.id) ?? p;
 
       drawn.push({
-        id: p.id,
+        ...p,
         x: pos.x,
         y: pos.y,
       });
@@ -603,12 +626,22 @@ function frame() {
     }
   }
 
-  render(
-    drawn,
+  for (let i = shotEffects.length - 1; i >= 0; i--) {
+    if (shotEffects[i]!.until <= nowMs) shotEffects.splice(i, 1);
+  }
+
+  render({
+    players: drawn,
     myId,
     ghost,
-    flashing
-  );
+    flashing,
+    shots: shotEffects,
+    lagComp: Boolean(lagComp),
+    prediction: config.prediction,
+    interpolation: config.interpolation,
+    rtt: clock.rtt,
+    correction: predictor.lastCorrection,
+  });
 
   requestAnimationFrame(frame);
 }

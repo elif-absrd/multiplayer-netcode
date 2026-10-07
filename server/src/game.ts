@@ -1,7 +1,8 @@
 import {
   ARENA_H, ARENA_W,
-  HISTORY_TICKS, INPUT_TAG, MAX_REWIND_MS, TAG_COOLDOWN_TICKS, TAG_RANGE, TICK_DT,
-  samplePositions, stepPlayer,
+  FIRE_COOLDOWN_TICKS, HISTORY_TICKS, INPUT_FIRE, MAX_REWIND_MS, PLAYER_MAX_HEALTH,
+  PLAYER_MAX_STAMINA, PLAYER_RADIUS, RESPAWN_TICKS, SHOT_DAMAGE, SHOT_RADIUS, TICK_DT,
+  firstWallDistance, makeShotRay, rayCircleDistance, samplePositions, stepPlayer,
   type ClientInput, type GameEvent, type PlayerState, type Pos, type ServerSnapshot, type TimelineEntry,
 } from "@netcode/shared";
 import { serverNow } from "./time";
@@ -18,10 +19,10 @@ interface ClockInfo {
 
 // Deterministic spawns (Phase 9 needs reproducibility, so no Math.random here).
 const SPAWNS: Pos[] = [
-  { x: ARENA_W * 0.25, y: ARENA_H * 0.5 },
-  { x: ARENA_W * 0.75, y: ARENA_H * 0.5 },
-  { x: ARENA_W * 0.25, y: ARENA_H * 0.25 },
-  { x: ARENA_W * 0.75, y: ARENA_H * 0.75 },
+  { x: 180, y: 220 },
+  { x: ARENA_W - 180, y: 220 },
+  { x: 180, y: ARENA_H - 220 },
+  { x: ARENA_W - 180, y: ARENA_H - 220 },
 ];
 
 export class Game {
@@ -33,7 +34,7 @@ export class Game {
   private players = new Map<number, PlayerState>();
   private inputQueues = new Map<number, ClientInput[]>();
   private clocks = new Map<number, ClockInfo>();
-  private lastTagTick = new Map<number, number>();
+  private lastFireTick = new Map<number, number>();
   private history: TimelineEntry[] = []; // Phase 5 ring buffer: one entry per tick
   private events: GameEvent[] = [];
   private nextId = 1;
@@ -47,7 +48,22 @@ export class Game {
   addPlayer(): number {
     const id = this.nextId++;
     const spawn = SPAWNS[(id - 1) % SPAWNS.length]!;
-    this.players.set(id, { id, x: spawn.x, y: spawn.y, vx: 0, vy: 0, lastProcessedInputSeq: 0 });
+    const aimX = id % 2 === 1 ? 1 : -1;
+    this.players.set(id, {
+      id,
+      x: spawn.x,
+      y: spawn.y,
+      vx: 0,
+      vy: 0,
+      aimX,
+      aimY: 0,
+      health: PLAYER_MAX_HEALTH,
+      stamina: PLAYER_MAX_STAMINA,
+      alive: true,
+      respawnTicks: 0,
+      score: 0,
+      lastProcessedInputSeq: 0,
+    });
     this.inputQueues.set(id, []);
     this.clocks.set(id, { offset: null, rtt: null });
     this.events.push({ kind: "join", id });
@@ -58,7 +74,7 @@ export class Game {
     this.players.delete(id);
     this.inputQueues.delete(id);
     this.clocks.delete(id);
-    this.lastTagTick.delete(id);
+    this.lastFireTick.delete(id);
     this.events.push({ kind: "leave", id });
   }
 
@@ -87,6 +103,8 @@ export class Game {
       clientTime: raw.clientTime,
       dx: num(raw.dx),
       dy: num(raw.dy),
+      aimX: num(raw.aimX),
+      aimY: num(raw.aimY),
       inputBits: num(raw.inputBits) | 0,
       viewDelay: Math.min(MAX_REWIND_MS, Math.max(0, num(raw.viewDelay))),
     };
@@ -100,7 +118,11 @@ export class Game {
 
     for (const [id, q] of this.inputQueues) {
       let p = this.players.get(id)!;
-      if (q.length === 0) {
+      if (!p.alive) {
+        for (const input of q) p.lastProcessedInputSeq = input.seq;
+        q.length = 0;
+        p = this.tickRespawn(p);
+      } else if (q.length === 0) {
         p = { ...p, vx: 0, vy: 0 }; // no input this tick: stand still
       } else {
         for (const input of q) {
@@ -108,7 +130,7 @@ export class Game {
           p.lastProcessedInputSeq = input.seq;
           // The attacker's position HERE equals what the client predicted at this input,
           // because inputs are applied in order with the same sim. Only the TARGET is rewound.
-          if (input.inputBits & INPUT_TAG) this.tryTag(p, input);
+          if (input.inputBits & INPUT_FIRE) this.tryShot(p, input);
         }
         q.length = 0;
       }
@@ -116,6 +138,26 @@ export class Game {
     }
 
     this.recordHistory();
+  }
+
+  private tickRespawn(p: PlayerState): PlayerState {
+    const respawnTicks = Math.max(0, p.respawnTicks - 1);
+    if (respawnTicks > 0) return { ...p, respawnTicks, vx: 0, vy: 0 };
+
+    const spawn = SPAWNS[(p.id - 1) % SPAWNS.length]!;
+    const alive = {
+      ...p,
+      x: spawn.x,
+      y: spawn.y,
+      vx: 0,
+      vy: 0,
+      health: PLAYER_MAX_HEALTH,
+      stamina: PLAYER_MAX_STAMINA,
+      alive: true,
+      respawnTicks: 0,
+    };
+    this.events.push({ kind: "respawn", id: p.id, x: spawn.x, y: spawn.y, tick: this.tick });
+    return alive;
   }
 
   private recordHistory() {
@@ -126,14 +168,14 @@ export class Game {
     if (this.history.length > HISTORY_TICKS) this.history.shift();
   }
 
-  // ---- Phase 5: lag-compensated tag ----
-  private tryTag(attacker: PlayerState, input: ClientInput) {
-    const last = this.lastTagTick.get(attacker.id) ?? -Infinity;
-    if (this.tick - last < TAG_COOLDOWN_TICKS) return;
-    this.lastTagTick.set(attacker.id, this.tick);
+  // ---- Phase 5+: lag-compensated hitscan shot ----
+  private tryShot(attacker: PlayerState, input: ClientInput) {
+    const last = this.lastFireTick.get(attacker.id) ?? -Infinity;
+    if (this.tick - last < FIRE_COOLDOWN_TICKS) return;
+    this.lastFireTick.set(attacker.id, this.tick);
 
     // What the world looks like RIGHT NOW (used when compensation is off, and for the hitNow metric).
-    const nowId = this.findTarget(attacker, (o) => o);
+    const nowTarget = this.findShotTarget(attacker, (o) => o);
 
     // What the attacker was actually looking at when they pressed the key.
     let rewindMs = 0;
@@ -149,34 +191,75 @@ export class Game {
       rewound = samplePositions(this.history, target);
     }
 
-    const targetId = rewound ? this.findTarget(attacker, (o) => rewound!.get(o.id) ?? o) : nowId;
+    const shotTarget = rewound ? this.findShotTarget(attacker, (o) => rewound!.get(o.id) ?? o) : nowTarget;
+    const hit = shotTarget.targetId !== null;
+    const targetId = shotTarget.targetId;
+    let killed = false;
+
+    if (hit && targetId !== null) {
+      const target = this.players.get(targetId);
+      if (target && target.alive) {
+        const health = Math.max(0, target.health - SHOT_DAMAGE);
+        killed = health <= 0;
+        this.players.set(targetId, {
+          ...target,
+          health,
+          alive: !killed,
+          respawnTicks: killed ? RESPAWN_TICKS : 0,
+          vx: killed ? 0 : target.vx,
+          vy: killed ? 0 : target.vy,
+        });
+
+        if (killed) {
+          attacker.score += 1;
+        }
+      }
+    }
 
     this.events.push({
-      kind: "tag",
+      kind: "shot",
       attacker: attacker.id,
       target: targetId,
-      hit: targetId !== null,
-      hitNow: nowId !== null,
+      hit,
+      hitNow: nowTarget.targetId !== null,
+      damage: hit ? SHOT_DAMAGE : 0,
+      killed,
+      blockedByWall: shotTarget.blockedByWall,
+      fromX: attacker.x,
+      fromY: attacker.y,
+      toX: shotTarget.endX,
+      toY: shotTarget.endY,
       tick: this.tick,
       rewindMs,
       compensated: rewound !== null,
     });
-    // Phase 6 will apply the consequence (score / "it" swap) here, using CURRENT state.
   }
 
-  private findTarget(attacker: PlayerState, posOf: (p: PlayerState) => Pos): number | null {
-    let best: number | null = null;
-    let bestDist = TAG_RANGE;
+  private findShotTarget(attacker: PlayerState, posOf: (p: PlayerState) => Pos) {
+    const ray = makeShotRay(attacker.x, attacker.y, attacker.aimX, attacker.aimY);
+    const wallDist = firstWallDistance(ray);
+    const maxDist = wallDist ?? ray.range;
+    let targetId: number | null = null;
+    let bestDist = maxDist;
+
     for (const other of this.players.values()) {
       if (other.id === attacker.id) continue;
+      if (!other.alive) continue;
       const pos = posOf(other);
-      const d = Math.hypot(pos.x - attacker.x, pos.y - attacker.y);
-      if (d <= bestDist) {
+      const d = rayCircleDistance(ray, { id: other.id, x: pos.x, y: pos.y, radius: SHOT_RADIUS });
+      if (d !== null && d <= bestDist) {
         bestDist = d;
-        best = other.id;
+        targetId = other.id;
       }
     }
-    return best;
+
+    const endDist = targetId === null ? maxDist : bestDist;
+    return {
+      targetId,
+      blockedByWall: targetId === null && wallDist !== null,
+      endX: ray.x + ray.dx * endDist,
+      endY: ray.y + ray.dy * endDist,
+    };
   }
 
   snapshot(): ServerSnapshot {
@@ -184,8 +267,10 @@ export class Game {
       t: "snapshot",
       tick: this.tick,
       serverTime: this.tickTime, // same timestamp as the history entry for this tick
-      players: [...this.players.values()].map(({ id, x, y, vx, vy, lastProcessedInputSeq }) => ({
-        id, x, y, vx, vy, lastProcessedInputSeq,
+      players: [...this.players.values()].map(({
+        id, x, y, vx, vy, aimX, aimY, health, stamina, alive, respawnTicks, score, lastProcessedInputSeq,
+      }) => ({
+        id, x, y, vx, vy, aimX, aimY, health, stamina, alive, respawnTicks, score, lastProcessedInputSeq,
       })),
       events: this.events,
     };

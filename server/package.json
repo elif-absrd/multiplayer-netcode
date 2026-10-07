@@ -1,10 +1,16 @@
 {
   "name": "server",
   "version": "1.0.0",
+  "private": true,
+  "type": "module",
   "description": "",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "dev": "tsx watch src/index.ts",
+    "start": "tsx src/index.ts",
+    "typecheck": "tsc",
+    "test": "tsx --test test/*.test.ts"
+
   },
   "keywords": [],
   "author": "",
@@ -14,6 +20,8 @@
     "ws": "^8.21.3"
   },
   "devDependencies": {
+    "@netcode/shared": "workspace:*",
+    "ws": "^8.21.3",
     "@types/node": "^22.20.3",
     "@types/ws": "^8.18.1",
     "tsx": "^4.23.13",

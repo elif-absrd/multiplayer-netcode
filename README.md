@@ -18,9 +18,10 @@ The primary experimental comparison is **lag compensation OFF vs ON** while vary
 |---|---|
 | Phase 0: Design Lock | ✅ Complete |
 | Phase 1: Project Setup | ✅ Complete |
-| Phase 1: Coding | ⏳ Not started |
-| Phase 2–11 | ⏳ Planned |
-
+| Phase 1–5: Core netcode | ✅ Complete |
+| Phase 6: Minimal shooter rules | ✅ Complete |
+| Three.js demo renderer | ✅ Complete |
+| Phase 7–11 | ⏳ Planned |
 The design is locked for implementation. Changes to protocol fields, timestamp semantics, proxy ordering, network configuration, database schema, compensation boundaries, or simulation tick semantics should be treated as explicit design changes.
 
 ---
@@ -56,15 +57,17 @@ The proxy is an **application-level WebSocket relay**. It receives complete WebS
 
 ### Authoritative simulation
 
-The server owns the official game state. It runs the simulation at a fixed **60 Hz** timestep and is responsible for:
+The server owns the official game state. It runs the simulation at a fixed **30 Hz** timestep and is responsible for:
 
 - player positions and velocities
+- aim direction
+- health, stamina, death, respawn, and score
 - input validation
 - arena bounds
-- tag results
+- cover collision and shot results
 - simulation tick/state
 
-Clients never submit authoritative positions, velocities, tag results, or tick state.
+Clients never submit authoritative positions, velocities, health, shot results, or tick state.
 
 ### Client-side prediction and reconciliation
 
@@ -109,7 +112,7 @@ Raw `clientTime` is untrusted. For lag compensation, the server uses the estimat
 
 The server keeps approximately **1 second of recent authoritative history**.
 
-When a tag input is received, the server:
+When a fire input is received, the server:
 
 ```text
 clientTime
@@ -124,7 +127,7 @@ find bracketing historical snapshots
     ↓
 interpolate target position
     ↓
-perform hit test
+perform hitscan ray test with wall occlusion
     ↓
 resolve action using current authoritative state
 ```
@@ -160,7 +163,7 @@ Jitter must not create artificial application-level message reordering. Each dir
 
 | Component | Technology |
 |---|---|
-| Browser client | TypeScript + HTML5 Canvas |
+| Browser client | TypeScript + Three.js |
 | Client transport | Native WebSocket API |
 | Server | Node.js + TypeScript |
 | WebSocket server | `ws` |
@@ -181,17 +184,52 @@ The current repository starts with the client and server components:
 
 ```text
 multiplayer-netcode/
-├── client/
-└── server/
-```
-
-The authoritative server implementation begins with:
-
-```text
-server/
-├── protocol.ts
-├── game.ts
-└── index.ts
+├─ package.json              # root scripts only
+├─ pnpm-workspace.yaml
+├─ tsconfig.base.json
+├─ .gitignore
+├─ README.md
+├─ docs/
+│  └─ phases.md              # what each phase adds + how to verify it
+│
+├─ shared/                   # @netcode/shared (used by BOTH sides)
+│  ├─ package.json
+│  ├─ tsconfig.json
+│  └─ src/
+│     ├─ index.ts            # re-exports everything
+│     ├─ constants.ts        # TICK_RATE, PLAYER_SPEED, combat values, etc.
+│     ├─ protocol.ts         # message types, encode/decode
+│     ├─ sim.ts              # deterministic step(state, input, dt)
+│     ├─ world.ts            # static arena cover and collision helpers
+│     └─ combat.ts           # pure hitscan and wall-occlusion helpers
+│
+├─ server/
+│  ├─ package.json
+│  ├─ tsconfig.json
+│  ├─ src/
+│  │  ├─ index.ts            # WebSocket bootstrap only
+│  │  ├─ game.ts             # authoritative loop, combat, snapshots
+│  │  └─ lagcomp.ts, rooms.ts, admin.ts, storage.ts
+│  └─ test/
+│     └─ game.test.ts        # your current test-game.ts
+│
+├─ client/
+│  ├─ package.json
+│  ├─ tsconfig.json
+│  ├─ index.html
+│  └─ src/
+│     ├─ main.ts             # wiring only
+│     ├─ net.ts              # WebSocket, send/receive
+│     ├─ input.ts            # keyboard → input commands
+│     ├─ render.ts           # Three.js WebGL arena renderer
+│     ├─ prediction.ts       # (phase) prediction + reconciliation
+│     ├─ interpolation.ts    # (phase) remote entity smoothing
+│     └─ style.css
+│
+└─ scripts/                  # cross-package dev tooling
+   ├─ smoke-test.ts          # boots server, connects N fake clients
+   ├─ bot.ts                 # (later) fake players for load
+   └─ lag-proxy.ts           # (later) simulate latency/jitter/loss
 ```
 
 Additional project components will be introduced as later phases are implemented, including the proxy, SQLite instrumentation, deterministic bots, and the analysis pipeline.
@@ -203,15 +241,17 @@ Additional project components will be introduced as later phases are implemented
 The initial values are centralized for reproducibility:
 
 ```ts
-const TICK_RATE = 60;
+const TICK_RATE = 30;
 const DT = 1 / TICK_RATE;
 
-const ARENA_WIDTH = 1000;
-const ARENA_HEIGHT = 600;
+const ARENA_WIDTH = 960;
+const ARENA_HEIGHT = 640;
 
-const PLAYER_RADIUS = 15;
-const MAX_SPEED = 200;       // world units / second
-const TAG_RADIUS = 30;
+const PLAYER_RADIUS = 16;
+const PLAYER_SPEED = 220;    // world units / second
+const SHOT_RANGE = 620;
+const SHOT_DAMAGE = 25;
+const PLAYER_MAX_HEALTH = 100;
 
 const HISTORY_DURATION_MS = 1000;
 const INTERPOLATION_DELAY_MS = 100;
@@ -240,13 +280,15 @@ All application messages are JSON objects with a `type` discriminator.
 
 ```ts
 type ClientInput = {
-  type: "input";
-  playerId: string;
+  t: "input";
   seq: number;
   clientTime: number;
   dx: number;
   dy: number;
+  aimX: number;
+  aimY: number;
   inputBits: number;
+  viewDelay: number;
 };
 ```
 
@@ -255,39 +297,51 @@ Semantics:
 - `seq`: monotonically increasing input sequence number
 - `clientTime`: monotonic client timestamp when the input was generated
 - `dx`, `dy`: movement direction only
-- `inputBits`: discrete action bitmask only
+- `aimX`, `aimY`: shot direction
+- `inputBits`: discrete action bitmask (`INPUT_FIRE`, `INPUT_SPRINT`)
 
 Movement is **not** encoded in `inputBits`.
 
-The first defined action bit is:
+The first defined action bits are:
 
 ```ts
-const TAG_PRESSED = 0x1;
+const INPUT_FIRE = 0x1;
+const INPUT_SPRINT = 0x2;
 ```
 
 ### Server snapshot
 
 ```ts
 type ServerSnapshot = {
-  type: "snapshot";
-  playerId: string;
+  t: "snapshot";
   tick: number;
   serverTime: number;
   players: {
-    id: string;
+    id: number;
     x: number;
     y: number;
     vx: number;
     vy: number;
+    aimX: number;
+    aimY: number;
+    health: number;
+    stamina: number;
+    alive: boolean;
+    respawnTicks: number;
+    score: number;
     lastProcessedInputSeq: number;
   }[];
   events: {
-    type: "tag";
-    attackerId: string;
-    targetId: string;
-    accepted: boolean;
-    targetX: number;
-    targetY: number;
+    kind: "shot";
+    attacker: number;
+    target: number | null;
+    hit: boolean;
+    hitNow: boolean;
+    damage: number;
+    killed: boolean;
+    blockedByWall: boolean;
+    rewindMs: number;
+    compensated: boolean;
   }[];
 };
 ```
@@ -296,19 +350,18 @@ type ServerSnapshot = {
 
 ```ts
 type PingRequest = {
-  type: "ping";
-  playerId: string;
+  t: "ping";
   clientTime: number;
+  offset?: number;
+  rtt?: number;
 };
 ```
 
 ```ts
 type PongResponse = {
-  type: "pong";
-  playerId: string;
+  t: "pong";
   clientTime: number;
-  serverReceiveTime: number;
-  serverSendTime: number;
+  serverTime: number;
 };
 ```
 
@@ -354,7 +407,7 @@ The logical server tick order is:
 
 Movement state is persistent. A delayed or dropped movement message does not automatically stop the server from using the latest valid movement state.
 
-A discrete action such as `TAG_PRESSED` is different: if that message is dropped, the action is lost and is not reconstructed.
+A discrete action such as `INPUT_FIRE` is different: if that message is dropped, the shot is lost and is not reconstructed.
 
 ---
 
@@ -473,7 +526,7 @@ sqrt(
 
 ### Target-side post-dodge acceptance rate
 
-The fraction of accepted tags where the target had already moved away from the tagged position on the target's displayed timeline.
+The fraction of accepted shots where the target had already moved away from the shot line on the target's displayed timeline.
 
 ---
 
@@ -514,7 +567,7 @@ Phase 4  Remote entity interpolation
    ↓
 Phase 5  Server history + lag compensation
    ↓
-Phase 6  Minimal game rules
+Phase 6  Minimal shooter rules
    ↓
 Phase 7  Network degradation proxy
    ↓
@@ -538,7 +591,7 @@ TypeScript browser client
         +
 native WebSocket
         +
-60 Hz fixed timestep
+30 Hz fixed timestep
         +
 raw server-authoritative movement
         +
@@ -555,8 +608,9 @@ This gives a working baseline before synchronization features are introduced.
 
 ### Included
 
-- two-player 2D tag game
+- two-player Three.js arena shooter
 - authoritative server simulation
+- hitscan shooting, cover, health, stamina, death, respawn, and scoring
 - real-time WebSocket communication
 - client-side prediction and reconciliation
 - remote-player interpolation
@@ -589,14 +643,17 @@ The primary development and demonstration environment is local or a controlled l
 
 The project should first be validated end to end on `localhost` before controlled network degradation and automated experiments are introduced.
 
-The repository currently contains the initial:
+Useful local commands:
 
-```text
-client/
-server/
+```bash
+pnpm dev              # run client + server on the default ports
+pnpm dev:server       # run the WebSocket server
+pnpm dev:client       # run the Vite/Three.js client
+pnpm test             # run authoritative game tests
+pnpm smoke            # connect two fake clients to a running server
 ```
 
-As implementation progresses, setup and run commands will be documented here alongside each added service.
+If port `8080` is already occupied, run the server with `PORT=8081` and the client with `VITE_SERVER_PORT=8081`.
 
 ---
 

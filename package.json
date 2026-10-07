@@ -1,0 +1,17 @@
+{
+  "name": "multiplayer-netcode",
+  "private": true,
+  "packageManager": "pnpm@10.17.1",
+  "scripts": {
+    "dev": "pnpm -r --parallel --filter server --filter client dev",
+    "dev:server": "pnpm --filter server dev",
+    "dev:client": "pnpm --filter client dev",
+    "typecheck": "pnpm -r typecheck",
+    "test": "pnpm --filter server test",
+    "smoke": "tsx scripts/smoke-test.ts"
+  },
+  "devDependencies": {
+    "tsx": "^4.23.13",
+    "typescript": "~6.0.2"
+  }
+}
